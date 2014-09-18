@@ -1,4 +1,5 @@
 # Copyright (c) 2006-2010, Gerardo Santana Gomez Garrido <gerardo.santana@gmail.com>
+# Rails 4 additions by Jihwan Song (jihwans@github)
 # All rights reserved.
 # 
 # Redistribution and use in source and binary forms, with or without
@@ -73,38 +74,54 @@ module Informix
         self.cursor_result.map { |row| row.values }
       end
 
-    end
-end
+    end # class Result
+end # module Informix
 
 module ActiveRecord
-  class Base
-    def self.informix_connection(config) #:nodoc:
+  class ::Hash
+    def delete_keys(*keys)
+      ret = {}
+      keys.each { |k|
+        ret[k] = delete k if has_key? k
+      }
+      ret
+    end
+  end
+  module ConnectionHandling # :nodoc:
+    IFX_PARAMS = [:host, :database, :username, :password, :nolog]
+    def informix_connection(config) #:nodoc:
+      ENV['DBDATE'] = 'Y4MD-' 
       require 'informix' unless self.class.const_defined?(:Informix)
       require 'stringio'
       
-      config = config.symbolize_keys
+      config.symbolize_keys!.keep_if { |k, _| IFX_PARAMS.include?(k) }
+      config.delete_if { |_, v| v.nil? }
 
       database    = config[:database].to_s
+      database    << "@#{config[:host]}" if config.has_key?(:host)
       username    = config[:username]
       password    = config[:password]
-      db          = Informix.connect(database, username, password)
-      ConnectionAdapters::InformixAdapter.new(db, logger, config)
+      conn_params = config.delete_keys :database, :username, :password, :host
+      ConnectionAdapters::InformixAdapter.new(Informix, logger, conn_params, config)
     end
+  end #module ConnectionHandling
 
-    after_save :write_lobs
-    private
-      def write_lobs
-        return if !connection.is_a?(ConnectionAdapters::InformixAdapter)
-        self.class.columns.each do |c|
-          value = self[c.name]
-          next if (![:text, :binary].include? c.type) || value.nil? || value == ''
-          connection.raw_connection.execute(<<-end_sql, StringIO.new(value))
-              UPDATE #{self.class.table_name} SET #{c.name} = ?
-              WHERE #{self.class.primary_key} = #{quote_value(id)}
-          end_sql
-        end
-      end
-  end # class Base
+  # This thing looks like a blob related headache...
+  # It does not look right to be here... do something from child class, only when necessary...
+  # class Base
+  #   after_save :write_lobs
+  #   def write_lobs
+  #     return unless connection.is_a?(Informix::Database)
+  #     self.class.columns.each do |c|
+  #       value = self[c.name]
+  #       next if (![:text, :binary].include? c.type) || value.nil? || value == ''
+  #       connection.raw_connection.execute(<<-end_sql, StringIO.new(value))
+  #           UPDATE #{self.class.table_name} SET #{c.name} = ?
+  #           WHERE #{self.class.primary_key} = #{quote_value(id)}
+  #       end_sql
+  #     end
+  #   end
+  # end
 
   module ConnectionAdapters
     class InformixColumn < Column
@@ -113,7 +130,6 @@ module ActiveRecord
                              column[:precision], column[:scale])
         super(column[:name], column[:default], sql_type, column[:nullable])
       end
-
       private
         IFX_TYPES_SUBSET = %w(CHAR CHARACTER CHARACTER\ VARYING DECIMAL FLOAT
                               LIST LVARCHAR MONEY MULTISET NCHAR NUMERIC
@@ -152,8 +168,10 @@ module ActiveRecord
     # Options:
     #
     # * <tt>:database</tt>  -- Defaults to nothing.
+    # * <tt>:host</tt>      -- (Optional) host name
     # * <tt>:username</tt>  -- Defaults to nothing.
     # * <tt>:password</tt>  -- Defaults to nothing.
+    # * <tt>:nolog</tt> - no transaction log option - no not use "begin work"
 
     class InformixAdapter < AbstractAdapter
 
@@ -163,10 +181,10 @@ module ActiveRecord
         include Arel::Visitors::BindVisitor
       end
 
-      def initialize(db, logger, config)
+      def initialize(db, logger, connection_parameters, config)
         super(db, logger)
 
-        @ifx_version = db.version.major.to_i
+        @connection_parameters, @config = connection_parameters, config
 
         #
         # We basically avoid +prepared_statements+ because we can't find
@@ -185,28 +203,39 @@ module ActiveRecord
           @visitor = BindSubstitution.new self
         end
 
-        @config = config
+        connect
       end
 
+      def connect
+        @connection = Informix.connect(
+          @connection_parameters[:database],
+          @connection_parameters[:username],
+          @connection_parameters[:password],
+        )
+        @ifx_version = @connection.version.major.to_i
+      end
+
+      IFX_NATIVE_DATABASE_TYPES = {
+        :primary_key => "serial primary key",
+        :string      => { :name => "varchar", :limit => 255  },
+        :text        => { :name => "text" },
+        :integer     => { :name => "integer" },
+        :float       => { :name => "float" },
+        :decimal     => { :name => "decimal" },
+        :datetime    => { :name => "datetime year to second" },
+        :timestamp   => { :name => "datetime year to second" },
+        :time        => { :name => "datetime hour to second" },
+        :date        => { :name => "date" },
+        :binary      => { :name => "byte"},
+        :boolean     => { :name => "boolean"}
+      }
       def native_database_types
-        {
-          :primary_key => "serial primary key",
-          :string      => { :name => "varchar", :limit => 255  },
-          :text        => { :name => "text" },
-          :integer     => { :name => "integer" },
-          :float       => { :name => "float" },
-          :decimal     => { :name => "decimal" },
-          :datetime    => { :name => "datetime year to second" },
-          :timestamp   => { :name => "datetime year to second" },
-          :time        => { :name => "datetime hour to second" },
-          :date        => { :name => "date" },
-          :binary      => { :name => "byte"},
-          :boolean     => { :name => "boolean"}
-        }
+        IFX_NATIVE_DATABASE_TYPES
       end
 
+      IFX_ADAPTER_NAME = 'Informix'
       def adapter_name
-        'Informix'
+        IFX_ADAPTER_NAME
       end
 
       #
@@ -238,7 +267,7 @@ module ActiveRecord
         log(sql, name, binds) { real_execute(sql, name) }
       end
 
-      alias_method :execute, :exec_query_with_no_return_value
+      alias_method :exec_query, :exec_query_with_no_return_value
 
       def get_cursor(sql, name = nil, binds = [])
         log(sql, name, binds) do
@@ -266,10 +295,6 @@ module ActiveRecord
         rows
       end
 
-      alias_method :update, :exec_query_with_no_return_value
-      alias_method :delete, :exec_query_with_no_return_value
-      alias_method :exec_insert, :exec_query_with_no_return_value
-
       def prepare(sql, name = nil, binds = [])
         log(sql, name, binds) { @connection.prepare(sql) }
       end
@@ -279,7 +304,7 @@ module ActiveRecord
       end
 
       def begin_db_transaction
-        exec_query_with_no_return_value("begin work")
+        exec_query_with_no_return_value("begin work") unless @config[:nolog]
       end
 
       def commit_db_transaction
