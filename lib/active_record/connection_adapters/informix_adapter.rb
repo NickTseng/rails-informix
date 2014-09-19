@@ -69,8 +69,7 @@ module Informix
 
       def fields
         res = []
-        return res if self.cursor_result.empty?
-        res = self.cursor_result.first.keys
+        res = self.cursor_result.first.keys unless self.cursor_result.empty?
       end
 
       def to_a
@@ -155,10 +154,10 @@ module ActiveRecord
     # * <tt>:username</tt>  -- Defaults to nothing.
     # * <tt>:password</tt>  -- Defaults to nothing.
     # * <tt>:nolog</tt> - no transaction log option - no not use "begin work"
+    # * <tt>:nomig</tt> - no migration option
 
     class InformixAdapter < AbstractAdapter
       ADAPTER_NAME = 'Informix'
-      CONNECTION_PARAMS = [:host, :database, :username, :password, :nolog]
       NATIVE_DATABASE_TYPES = {
         :primary_key => "serial primary key",
         :string      => { :name => "varchar", :limit => 255  },
@@ -254,8 +253,7 @@ module ActiveRecord
           )
         # @connection_parameters, @config = connection_parameters, config
         @config = config
-
-        c
+        @connection = c
       end
 
       def native_database_types
@@ -266,36 +264,27 @@ module ActiveRecord
         ADAPTER_NAME
       end
 
-      #
-      # FIXME: in the very specific case of DDS we are not using the "_seq"
-      # scheme at all so we don't want to prefetch primary keys at any time.
-      # This is combined with the fact that the +composite_primary_keys+ gem
-      # does not support auto-incrementing sequences.
-      #
-      def prefetch_primary_key?(table_name = nil)
-        false
-      end
- 
       def supports_migrations? #:nodoc:
-        true
-      end
-
-      def default_sequence_name(table, column) #:nodoc:
-        "#{table}_seq"
+        !@config[:nomig]
       end
 
       # DATABASE STATEMENTS =====================================
 
-      def real_execute(sql, name = nil)
-        @last_return_value = @connection.immediate(sql)
-        nil
+      # Executes the SQL statement in the context of this connection.
+      # -- expects no return value
+      def execute(sql, name = nil)
+        log(sql, name) { @last_return_value = @connection.immediate(sql) }
       end
 
-      def exec_query_with_no_return_value(sql, name = nil, binds = [])
-        log(sql, name, binds) { real_execute(sql, name) }
+      # Executes SQL, expects returns
+      def exec_query(sql, name = nil, binds = [])
+        result = nil
+        get_cursor(sql, name, binds) do
+          |cursor|
+          result = Informix::Result.new(cursor.open.fetch_hash_all)
+        end
+        ActiveRecord::Result.new(result.fields, result.to_a) if result
       end
-
-      alias_method :exec_query, :exec_query_with_no_return_value
 
       def get_cursor(sql, name = nil, binds = [])
         log(sql, name, binds) do
@@ -305,22 +294,17 @@ module ActiveRecord
         end
       end
 
-      def exec_query_with_return_value(sql, name = nil, binds = [])
-        result = nil
-        get_cursor(sql, name, binds) do
-          |cursor|
-          result = Informix::Result.new(cursor.open.fetch_hash_all)
-        end
-        ActiveRecord::Result.new(result.fields, result.to_a) if result
+      alias :select :exec_query
+
+      def insert_sql(sql, name = nil, pk = nil, id_value = nil, sequence_name = nil)
+        execute(sql, name)
+        r = exec_query("select first 1 dbinfo('sqlca.sqlerrd1') from systables")
+        r.rows[0][0] unless r.nil?
       end
 
-      def select_rows(sql, name = nil, binds = [])
-        rows = []
-        get_cursor(sql, name, binds) do
-          |cursor|
-          rows = cursor.open.fetch_hash_all
-        end
-        rows
+      def exec_insert(sql, name, binds, pk = nil, sequence_name = nil)
+        #exec_query(sql, name, binds)
+        insert_sql sql, name, pk, nil, sequence_name
       end
 
       def prepare(sql, name = nil, binds = [])
@@ -332,15 +316,15 @@ module ActiveRecord
       end
 
       def begin_db_transaction
-        exec_query_with_no_return_value("begin work") unless @config[:nolog]
+        execute("begin work") unless @config[:nolog]
       end
 
       def commit_db_transaction
-        @connection.commit
+        @connection.commit unless @config[:nolog]
       end
 
       def rollback_db_transaction
-        @connection.rollback
+        @connection.rollback unless @config[:nolog]
       end
       
       def primary_key(table_name) #:nodoc:
@@ -352,10 +336,6 @@ module ActiveRecord
           res = rows.first if rows
         end
         res
-      end
-
-      def next_sequence_value(sequence_name)
-        exec_query_with_return_value("select #{sequence_name}.nextval id from systables where tabid=1")['id']
       end
 
       # QUOTING ===========================================
@@ -415,21 +395,19 @@ module ActiveRecord
       # end
 
       # def drop_database(name)
-      #   exec_query_with_no_return_value("drop database #{name}")
+      #   execute("drop database #{name}")
       # end
 
       # def create_database(name)
-      #   exec_query_with_no_return_value("create database #{name}")
+      #   execute("create database #{name}")
       # end
 
       def create_table(name, options = {})
         super(name, options)
-        execute("CREATE SEQUENCE #{name}_seq")
       end
 
       def drop_table(name, options = {})
         super(name, options)
-        execute("DROP SEQUENCE #{name}_seq")
       end
 
       # XXX
@@ -438,27 +416,21 @@ module ActiveRecord
       end
             
       def rename_column(table, column, new_column_name)
-        exec_query_with_no_return_value("RENAME COLUMN #{table}.#{column} TO #{new_column_name}")
+        execute("RENAME COLUMN #{table}.#{column} TO #{new_column_name}")
       end
       
       def change_column(table_name, column_name, type, options = {}) #:nodoc:
         sql = "ALTER TABLE #{table_name} MODIFY #{column_name} #{type_to_sql(type, options[:limit])}"
         add_column_options!(sql, options)
-        exec_query_with_no_return_value(sql)
+        execute(sql)
       end
 
       def remove_index(table_name, options = {})
-        exec_query_with_no_return_value("DROP INDEX #{index_name(table_name, options)}")
+        execute("DROP INDEX #{index_name(table_name, options)}")
       end
 
       def delete(dstmt, name = nil, binds = [])
-        exec_query_with_no_return_value(to_sql(dstmt, binds), name, binds)
-      end
-
-      protected
-
-      def select(sql, name = nil, binds = [])
-        exec_query_with_return_value(sql, name, binds).to_a
+        execute(to_sql(dstmt, binds), name, binds)
       end
 
     end #class InformixAdapter < AbstractAdapter
