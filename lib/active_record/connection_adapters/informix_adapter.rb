@@ -27,9 +27,12 @@
 # POSSIBILITY OF SUCH DAMAGE.
 
 require 'active_record/connection_adapters/abstract_adapter'
+require 'active_record/connection_adapters/statement_pool'
 require 'arel/visitors/informix'
 require 'arel/visitors/bind_visitor'
-require 'informix' unless self.class.const_defined?(:Informix)
+
+gem 'ruby-informix', '~> 0.8'
+require 'informix'
 
 module Informix
 
@@ -78,36 +81,16 @@ module Informix
 end # module Informix
 
 module ActiveRecord
-  class ::Hash
-    def delete_keys(*keys)
-      ret = {}
-      keys.each { |k|
-        ret[k] = delete k if has_key? k
-      }
-      ret
-    end
-  end
   module ConnectionHandling # :nodoc:
-    IFX_PARAMS = [:host, :database, :username, :password, :nolog]
     def informix_connection(config) #:nodoc:
       ENV['DBDATE'] = 'Y4MD-' 
-      require 'informix' unless self.class.const_defined?(:Informix)
-      require 'stringio'
-      
-      config.symbolize_keys!.keep_if { |k, _| IFX_PARAMS.include?(k) }
-      config.delete_if { |_, v| v.nil? }
-
-      database    = config[:database].to_s
-      database    << "@#{config[:host]}" if config.has_key?(:host)
-      username    = config[:username]
-      password    = config[:password]
-      conn_params = config.delete_keys :database, :username, :password, :host
-      ConnectionAdapters::InformixAdapter.new(Informix, logger, conn_params, config)
+      ConnectionAdapters::InformixAdapter.new(nil, logger, nil, config)
     end
   end #module ConnectionHandling
 
   # This thing looks like a blob related headache...
   # It does not look right to be here... do something from child class, only when necessary...
+  # require 'stringio'
   # class Base
   #   after_save :write_lobs
   #   def write_lobs
@@ -174,6 +157,23 @@ module ActiveRecord
     # * <tt>:nolog</tt> - no transaction log option - no not use "begin work"
 
     class InformixAdapter < AbstractAdapter
+      ADAPTER_NAME = 'Informix'
+      CONNECTION_PARAMS = [:host, :database, :username, :password, :nolog]
+      NATIVE_DATABASE_TYPES = {
+        :primary_key => "serial primary key",
+        :string      => { :name => "varchar", :limit => 255  },
+        :text        => { :name => "text" },
+        :integer     => { :name => "integer" },
+        :float       => { :name => "float" },
+        :decimal     => { :name => "decimal" },
+        :datetime    => { :name => "datetime year to second" },
+        :timestamp   => { :name => "datetime year to second" },
+        :time        => { :name => "datetime hour to second" },
+        :date        => { :name => "date" },
+        :binary      => { :name => "byte"},
+        :boolean     => { :name => "boolean"}
+      }
+      QUOTED_TRUE, QUOTED_FALSE = %q{'t'}, %q{'f'}
 
       attr_reader :last_return_value
 
@@ -181,11 +181,48 @@ module ActiveRecord
         include Arel::Visitors::BindVisitor
       end
 
-      def initialize(db, logger, connection_parameters, config)
+      class StatementPool < ConnectionAdapters::StatementPool
+        def initialize(connection, max = 1000)
+          super
+          @cache = Hash.new { |h,pid| h[pid] = {} }
+        end
+
+        def each(&block); cache.each(&block); end
+        def key?(key);    cache.key?(key); end
+        def [](key);      cache[key]; end
+        def length;       cache.length; end
+        def delete(key);  cache.delete(key); end
+
+        def []=(sql, key)
+          while @max <= cache.size
+            cache.shift.last[:stmt].close
+          end
+          cache[sql] = key
+        end
+
+        def clear
+          cache.values.each do |hash|
+            hash[:stmt].close
+          end
+          cache.clear
+        end
+
+        private
+        def cache
+          @cache[Process.pid]
+        end
+      end
+
+      # either config, logger -- or -- 
+      def initialize(db, logger, connection_parameters = nil, config = nil)
         super(db, logger)
+        config.symbolize_keys!
+        config.delete_if { |_, v| v.nil? }
 
-        @connection_parameters, @config = connection_parameters, config
-
+        database    = config[:database].to_s
+        database    << "@#{config[:host]}" if config.has_key?(:host)
+        username    = config[:username]
+        password    = config[:password]
         #
         # We basically avoid +prepared_statements+ because we can't find
         # documentation on what they are (we *suppose* something, but that's
@@ -203,39 +240,30 @@ module ActiveRecord
           @visitor = BindSubstitution.new self
         end
 
-        connect
-      end
-
-      def connect
-        @connection = Informix.connect(
-          @connection_parameters[:database],
-          @connection_parameters[:username],
-          @connection_parameters[:password],
+        c = Informix.connect(
+          config[:database],
+          config[:username],
+          config[:password]
         )
-        @ifx_version = @connection.version.major.to_i
+        @ifx_version = c.version.major.to_i
+
+        @statements = StatementPool.new(
+          c, self.class.type_cast_config_to_integer(
+              config.fetch(:statement_limit) { 1000 }
+            )
+          )
+        # @connection_parameters, @config = connection_parameters, config
+        @config = config
+
+        c
       end
 
-      IFX_NATIVE_DATABASE_TYPES = {
-        :primary_key => "serial primary key",
-        :string      => { :name => "varchar", :limit => 255  },
-        :text        => { :name => "text" },
-        :integer     => { :name => "integer" },
-        :float       => { :name => "float" },
-        :decimal     => { :name => "decimal" },
-        :datetime    => { :name => "datetime year to second" },
-        :timestamp   => { :name => "datetime year to second" },
-        :time        => { :name => "datetime hour to second" },
-        :date        => { :name => "date" },
-        :binary      => { :name => "byte"},
-        :boolean     => { :name => "boolean"}
-      }
       def native_database_types
-        IFX_NATIVE_DATABASE_TYPES
+        NATIVE_DATABASE_TYPES
       end
 
-      IFX_ADAPTER_NAME = 'Informix'
       def adapter_name
-        IFX_ADAPTER_NAME
+        ADAPTER_NAME
       end
 
       #
@@ -345,6 +373,24 @@ module ActiveRecord
         super
       end
 
+      # super
+      #def quoted_true
+      #  QUOTED_TRUE
+      #end
+
+      def unquoted_true
+        1
+      end
+
+      # super
+      #def quoted_false
+      #  QUOTED_FALSE
+      #end
+
+      def unquoted_false
+        0
+      end
+
       # SCHEMA STATEMENTS =====================================
       def tables(name = nil)
         @connection.cursor(<<-end_sql) do |cur|
@@ -363,18 +409,18 @@ module ActiveRecord
       # These calls cannot be done from an open connection, so they
       # won't work in any case.
       #
-#     def recreate_database(name)
-#       drop_database(name)
-#       create_database(name)
-#     end
+      # def recreate_database(name)
+      #   drop_database(name)
+      #   create_database(name)
+      # end
 
-#     def drop_database(name)
-#       exec_query_with_no_return_value("drop database #{name}")
-#     end
+      # def drop_database(name)
+      #   exec_query_with_no_return_value("drop database #{name}")
+      # end
 
-#     def create_database(name)
-#       exec_query_with_no_return_value("create database #{name}")
-#     end
+      # def create_database(name)
+      #   exec_query_with_no_return_value("create database #{name}")
+      # end
 
       def create_table(name, options = {})
         super(name, options)
