@@ -360,7 +360,6 @@ module ActiveRecord
       def columns(table_name, name = nil)
         @connection.columns(table_name).map {|col|
           
-          puts col
           field_name = col[:name]
           sql_type = col[:stype]
           cast_type = lookup_cast_type(sql_type)
