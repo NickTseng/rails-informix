@@ -121,7 +121,7 @@ module ActiveRecord
           type.sub!(/money/i, 'DECIMAL')
           if IFX_TYPES_SUBSET.include? type.upcase
             if prec == 0
-              "#{type}(#{limit})" 
+              "#{type}" 
             else
               "#{type}(#{prec},#{scale})"
             end
