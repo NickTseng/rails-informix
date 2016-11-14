@@ -7,7 +7,7 @@ Gem::Specification.new do |s|
   s.description = 'Active Record adapter for connecting to an IBM Informix database'
   s.version = PKG_VERSION
 
-  s.add_dependency 'activerecord', '~> 4.1', '>= 3.2.13'
+  s.add_dependency 'activerecord', '~> 5.1', '>= 3.2.13'
   s.add_dependency 'ruby-informix', '~> 0.8'
   s.require_path = 'lib'
 
