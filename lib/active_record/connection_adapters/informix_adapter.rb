@@ -1,11 +1,11 @@
 # Copyright (c) 2006-2010, Gerardo Santana Gomez Garrido <gerardo.santana@gmail.com>
 # Rails 4 additions by Jihwan Song (jihwans@github)
 # All rights reserved.
-# 
+#
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
 # are met:
-# 
+#
 # 1. Redistributions of source code must retain the above copyright
 #    notice, this list of conditions and the following disclaimer.
 # 2. Redistributions in binary form must reproduce the above copyright
@@ -13,7 +13,7 @@
 #    documentation and/or other materials provided with the distribution.
 # 3. The name of the author may not be used to endorse or promote products
 #    derived from this software without specific prior written permission.
-# 
+#
 # THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
 # IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
 # WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
@@ -36,53 +36,67 @@ require 'informix'
 
 module Informix
 
+  #
+  # <tt>Informix::Result</tt> is a class needed to make sense out of the
+  # <tt>Informix#cursor()</tt> return value and adjust it in a way
+  # that is palatable to <tt>ActiveRecord::Result</tt> objects, namely
+  # to carry the +fields+ and the +to_a+ methods properly
+  #
+  class Result
+
+    include Enumerable
+
+    attr_reader :cursor_result
+
     #
-    # <tt>Informix::Result</tt> is a class needed to make sense out of the
-    # <tt>Informix#cursor()</tt> return value and adjust it in a way
-    # that is palatable to <tt>ActiveRecord::Result</tt> objects, namely
-    # to carry the +fields+ and the +to_a+ methods properly
+    # +cursor_result+ must be in the form of an array of hashes
+    # in which each hash represents a row returned by the database.
+    # The hash has the fields names as keys and the vaules for that row as
+    # values.
     #
-    class Result
+    # Trivial Example:
+    #
+    # <tt>
+    #    cursor_results = [{ "COUNT(*) => 33" }]
+    #    ir = Informix::Result.new(cursor_results)
+    #    ir.fields => ["COUNT(*)"]
+    #    ir.values => [33]
+    # </tt>
+    #
+    def initialize(cr)
+      @cursor_result = cr
+    end
 
-      include Enumerable
+    def fields
+      res = []
+      res = self.cursor_result.first.keys unless self.cursor_result.empty?
+    end
 
-      attr_reader :cursor_result
+    def to_a
+      ic = Iconv.new("utf-8","big5")
+    
+      self.cursor_result.map { |row| 
 
-      #
-      # +cursor_result+ must be in the form of an array of hashes
-      # in which each hash represents a row returned by the database.
-      # The hash has the fields names as keys and the vaules for that row as
-      # values.
-      #
-      # Trivial Example:
-      #
-      # <tt>
-      #    cursor_results = [{ "COUNT(*) => 33" }]
-      #    ir = Informix::Result.new(cursor_results)
-      #    ir.fields => ["COUNT(*)"]
-      #    ir.values => [33]
-      # </tt>
-      #
-      def initialize(cr)
-        @cursor_result = cr
-      end
+        row.values.each do |col|  
+          puts col.class
+          if col.class == String
+            puts 'done'
 
-      def fields
-        res = []
-        res = self.cursor_result.first.keys unless self.cursor_result.empty?
-      end
+            col = ic.iconv(col)
+            puts col.encoding
+          end
+          
+        end
+      }
+    end
 
-      def to_a
-        self.cursor_result.map { |row| row.values }
-      end
-
-    end # class Result
+  end # class Result
 end # module Informix
 
 module ActiveRecord
   module ConnectionHandling # :nodoc:
     def informix_connection(config) #:nodoc:
-      ENV['DBDATE'] = 'Y4MD-' 
+      ENV['DBDATE'] = 'Y4MD-'
       ConnectionAdapters::InformixAdapter.new(nil, logger, nil, config)
     end
   end #module ConnectionHandling
@@ -106,44 +120,7 @@ module ActiveRecord
   # end
 
   module ConnectionAdapters
-    class InformixColumn < Column
-      def initialize(column)
-        sql_type = make_type(column[:stype], column[:length],
-                             column[:precision], column[:scale])
-        super(column[:name], column[:default], sql_type, column[:nullable])
-      end
-      private
-        IFX_TYPES_SUBSET = %w(CHAR CHARACTER CHARACTER\ VARYING DECIMAL FLOAT
-                              LIST LVARCHAR MONEY MULTISET NCHAR NUMERIC
-                              NVARCHAR SERIAL SERIAL8 VARCHAR).freeze
-
-        def make_type(type, limit, prec, scale)
-          type.sub!(/money/i, 'DECIMAL')
-          if IFX_TYPES_SUBSET.include? type.upcase
-            if prec == 0
-              "#{type}" 
-            else
-              "#{type}(#{prec},#{scale})"
-            end
-          elsif type =~ /datetime/i
-            type = "time" if prec == 6
-            type
-          elsif type =~ /byte/i
-            "binary"
-          else
-            type
-          end
-        end
-
-        def simplified_type(sql_type)
-          if sql_type =~ /serial/i
-            :primary_key
-          else
-            super
-          end
-        end
-    end
-
+   
     # This adapter requires Ruby/Informix
     # http://ruby-informix.rubyforge.org
     #
@@ -212,7 +189,7 @@ module ActiveRecord
         end
       end
 
-      # either config, logger -- or -- 
+      # either config, logger -- or --
       def initialize(db, logger, connection_parameters = nil, config = nil)
         super(db, logger)
         config.symbolize_keys!
@@ -248,9 +225,9 @@ module ActiveRecord
 
         @statements = StatementPool.new(
           c, self.class.type_cast_config_to_integer(
-              config.fetch(:statement_limit) { 1000 }
-            )
+            config.fetch(:statement_limit) { 1000 }
           )
+        )
         # @connection_parameters, @config = connection_parameters, config
         @config = config
         @connection = c
@@ -326,11 +303,11 @@ module ActiveRecord
       def rollback_db_transaction
         @connection.rollback unless @config[:nolog]
       end
-      
+
       def primary_key(table_name) #:nodoc:
         res = nil
         @connection.cursor(<<-end_sql) do |cur|
-            SELECT FIRST 1 ct.constrname FROM sysconstraints ct, systables st WHERE st.tabid = ct.tabid AND ct.constrtype = 'P' AND st.tabname = '#{table_name}'
+          SELECT FIRST 1 ct.constrname FROM sysconstraints ct, systables st WHERE st.tabid = ct.tabid AND ct.constrtype = 'P' AND st.tabname = '#{table_name}'
           end_sql
           rows = cur.open.fetch
           res = rows.first if rows
@@ -374,15 +351,28 @@ module ActiveRecord
       # SCHEMA STATEMENTS =====================================
       def tables(name = nil)
         @connection.cursor(<<-end_sql) do |cur|
-            SELECT tabname FROM systables WHERE tabid > 99 AND tabtype != 'Q'
+          SELECT tabname FROM systables WHERE tabid > 99 AND tabtype != 'Q'
           end_sql
           cur.open.fetch_all.flatten
         end
       end
 
       def columns(table_name, name = nil)
-        @connection.columns(table_name).map {|col| InformixColumn.new(col) }
+        @connection.columns(table_name).map {|col|
+          
+          puts col
+          field_name = col[:name]
+          sql_type = col[:stype]
+          cast_type = lookup_cast_type(sql_type)
+
+          Column.new(col[:name], col[:default], cast_type, sql_type, col[:nullable])
+        }
       end
+
+      def new_column(field, default, cast_type, sql_type = nil, null = true, collation = "", extra = "") # :nodoc:        
+        Column.new(field, default, cast_type, sql_type, null, collation, true, extra)
+      end
+
 
       # MIGRATION =========================================
       #
@@ -414,11 +404,11 @@ module ActiveRecord
       def indexes(table_name, name = nil)
         indexes = []
       end
-            
+
       def rename_column(table, column, new_column_name)
         execute("RENAME COLUMN #{table}.#{column} TO #{new_column_name}")
       end
-      
+
       def change_column(table_name, column_name, type, options = {}) #:nodoc:
         sql = "ALTER TABLE #{table_name} MODIFY #{column_name} #{type_to_sql(type, options[:limit])}"
         add_column_options!(sql, options)
