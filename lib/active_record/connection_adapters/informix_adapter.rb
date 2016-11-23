@@ -73,20 +73,11 @@ module Informix
     end
 
     def to_a
-      ic = Iconv.new("utf-8","big5")
+      # ic = Iconv.new("utf-8","big5")
     
       self.cursor_result.map { |row| 
 
-        row.values.each do |col|  
-          puts col.class
-          if col.class == String
-            puts 'done'
-
-            col = ic.iconv(col)
-            puts col.encoding
-          end
-          
-        end
+        row.values
       }
     end
 
@@ -256,8 +247,7 @@ module ActiveRecord
       # Executes SQL, expects returns
       def exec_query(sql, name = nil, binds = [])
         result = nil
-        get_cursor(sql, name, binds) do
-          |cursor|
+        get_cursor(sql, name, binds) do |cursor|
           result = Informix::Result.new(cursor.open.fetch_hash_all)
         end
         ActiveRecord::Result.new(result.fields, result.to_a) if result
