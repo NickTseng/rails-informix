@@ -3,7 +3,7 @@ require 'rake'
 require 'rubygems/package_task'
 
 PKG_NAME = 'activerecord-informix-adapter'
-PKG_VERSION = "1.2.1"
+PKG_VERSION = "1.2.2"
 
 spec = Gem::Specification.new do |s|
   s.name = PKG_NAME
